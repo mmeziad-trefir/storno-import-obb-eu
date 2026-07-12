@@ -1,6 +1,5 @@
-#[README (1).md](https://github.com/user-attachments/files/29937537/README.1.md)
 # Mat Star → UBB import file generator
-
+[README (1).md](https://github.com/user-attachments/files/29937537/README.1.md)
 A single static page. No server, no backend — everything happens in the
 visitor's browser (the .docx never leaves their computer).
 
