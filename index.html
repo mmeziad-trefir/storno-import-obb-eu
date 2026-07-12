@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Мат Стар → ОББ файл за възстановявания</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --paper:#f6f4ef;
+    --ink:#1f2a24;
+    --ledger:#2e4d3f;
+    --ledger-light:#4a7461;
+    --flag:#b3441c;
+    --flag-bg:#fbe9e1;
+    --line:#d8d2c4;
+    --mono: "IBM Plex Mono", "Courier New", monospace;
+    --serif: "IBM Plex Serif", Georgia, serif;
+  }
+  @font-face{ font-family:"IBM Plex Serif"; src:local("Georgia"); }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--mono);
+    padding:32px 24px 80px;
+  }
+  .wrap{max-width:1100px; margin:0 auto;}
+  header{border-bottom:2px solid var(--ledger); padding-bottom:16px; margin-bottom:28px;}
+  h1{
+    font-family:var(--serif); font-weight:600; font-size:28px; margin:0 0 6px;
+    color:var(--ledger); letter-spacing:.2px;
+  }
+  header p{margin:0; color:#5a5a52; font-size:13.5px; line-height:1.5; max-width:640px;}
+  .dropzone{
+    border:2px dashed var(--ledger-light);
+    border-radius:4px;
+    padding:40px 20px;
+    text-align:center;
+    background:#fff;
+    cursor:pointer;
+    transition:background .15s, border-color .15s;
+    margin-bottom:20px;
+  }
+  .dropzone.drag{background:#eef4ef; border-color:var(--ledger);}
+  .dropzone strong{display:block; font-family:var(--serif); font-size:17px; color:var(--ledger); margin-bottom:4px;}
+  .dropzone span{font-size:12.5px; color:#7a7a70;}
+  input[type=file]{display:none;}
+
+  .summary{
+    display:flex; gap:18px; flex-wrap:wrap; margin:18px 0 22px;
+    font-size:12.5px;
+  }
+  .summary .stat{
+    background:#fff; border:1px solid var(--line); border-radius:3px;
+    padding:8px 14px; min-width:120px;
+  }
+  .summary .stat b{display:block; font-family:var(--serif); font-size:20px; color:var(--ledger);}
+  .summary .stat.warn b{color:var(--flag);}
+
+  table{width:100%; border-collapse:collapse; background:#fff; font-size:12.5px;}
+  thead th{
+    text-align:left; background:var(--ledger); color:#fff;
+    padding:8px 8px; font-weight:500; font-size:11px; letter-spacing:.03em;
+    text-transform:uppercase; position:sticky; top:0;
+  }
+  tbody tr{border-bottom:1px solid var(--line);}
+  tbody tr.flagged{background:var(--flag-bg);}
+  tbody tr.excluded{opacity:.35;}
+  td{padding:6px 8px; vertical-align:top;}
+  td input, td textarea{
+    width:100%; border:1px solid transparent; background:transparent;
+    font-family:var(--mono); font-size:12.5px; padding:3px 4px; border-radius:2px;
+    color:var(--ink);
+  }
+  td input:focus, td textarea:focus{border-color:var(--ledger-light); background:#fbfaf6; outline:none;}
+  td.name{min-width:170px;}
+  td.iban input{min-width:190px; letter-spacing:.02em;}
+  td.bic input{width:90px;}
+  td.amount input{width:75px; text-align:right;}
+  td.flagcol{width:26px; text-align:center;}
+  td.raw{color:#8a8a80; font-size:11px; max-width:220px;}
+  td.raw pre{white-space:pre-wrap; margin:0; font-family:var(--mono);}
+  .flag-dot{color:var(--flag); font-size:15px;}
+  .excl-toggle{cursor:pointer; user-select:none;}
+
+  .actions{
+    display:flex; gap:10px; align-items:center; margin:22px 0 8px; flex-wrap:wrap;
+  }
+  button{
+    font-family:var(--mono); font-size:13px; cursor:pointer;
+    padding:9px 16px; border-radius:3px; border:1px solid var(--ledger);
+    background:var(--ledger); color:#fff;
+  }
+  button.secondary{background:#fff; color:var(--ledger);}
+  button:disabled{opacity:.4; cursor:not-allowed;}
+  .note{font-size:11.5px; color:#7a7a70; margin-top:4px;}
+  #fileInputTop{display:none;}
+  .hidden{display:none;}
+  footer{margin-top:40px; font-size:11px; color:#9a9a90; border-top:1px solid var(--line); padding-top:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Файл за импорт в ОББ (eBB)</h1>
+    <p>Пуснете тук .docx списъка с клиенти за възстановяване. Инструментът разпознава име, IBAN и суми, показва резултата за проверка и генерира .txt файл във формат „Превод в евро в страната" (IBAN311) за импорт в ОББ Business Banking.</p>
+  </header>
+
+  <div class="dropzone" id="dropzone">
+    <strong>Пуснете .docx файла тук, или кликнете за избор</strong>
+    <span>Очаква се блокове от по 4 реда: име, IBAN, служебен номер, сума — както в примерния файл</span>
+    <input type="file" id="fileInput" accept=".docx">
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="summary" id="summary"></div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="flagcol"></th>
+          <th>Име на бенефициент</th>
+          <th>IBAN</th>
+          <th>BIC</th>
+          <th>Сума (EUR)</th>
+          <th>Основание</th>
+          <th>Суров текст от документа</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+
+    <div class="actions">
+      <button id="downloadTxt">Изтегли .txt (IBAN311)</button>
+      <button id="downloadXml" class="secondary">Изтегли .xml</button>
+      <span class="note" id="exportNote"></span>
+    </div>
+    <p class="note">Проверете реда преди изтегляне — редовете в оранжево нямат сигурно разпознат IBAN или сума и трябва да се допълнят на ръка. Кликнете върху ⊘ в началото на реда, за да изключите запис от износа.</p>
+  </div>
+
+  <footer>Всичко се обработва локално в браузъра — файлът не се качва никъде.</footer>
+</div>
+
+<script>
+/* ---------- BIC lookup for Bulgarian bank codes (from IBAN chars 5-8) ---------- */
+const BIC_TABLE = {
+  UBBS:"UBBSBGSF", STSA:"STSABGSF", UNCR:"UNCRBGSF", CECB:"CECBBGSF",
+  FINV:"FINVBGSF", BPBI:"BPBIBGSF", TTBB:"TTBBBGSF", BUIN:"BUINBGSF",
+  DEMI:"DEMIBGSF", CREX:"CREXBGSF", PRCB:"PRCBBGSF", SOMB:"SOMBBGSF",
+  BNBG:"BNBGBGSD", TBIB:"TBIBBGSF", INTF:"INTFBGSF", RZBB:"RZBBBGSF",
+  IABG:"IORTBGSF", BGUS:"BGUSBGSF", ROYA:"ROYABGSF"
+};
+function guessBic(iban){
+  const code = (iban||"").toUpperCase().replace(/\s/g,"").substr(4,4);
+  if (BIC_TABLE[code]) return {bic: BIC_TABLE[code], guessed:false};
+  if (/^[A-Z]{4}$/.test(code)) return {bic: code + "BGSF", guessed:true};
+  return {bic:"", guessed:true};
+}
+
+/* ---------- parsing ---------- */
+const IBAN_RE = /\bBG\d{2}[A-Z]{4}[A-Z0-9]{6,}\b/i;
+// amount tokens: 1-2 decimal digits after a comma or dot, e.g. 11,75 or 23.50
+const AMOUNT_RE = /\d{1,7}[.,]\d{2}\b/g;
+// a line that is essentially only letters/spaces/hyphens (a name)
+const NAME_LINE_RE = /^[A-Za-zА-Яа-яЁёЇїІіЙй\-\.\s]{3,}$/;
+
+async function extractParagraphs(file){
+  const buf = await file.arrayBuffer();
+  const zip = await JSZip.loadAsync(buf);
+  const xml = await zip.file("word/document.xml").async("string");
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const paras = Array.from(doc.getElementsByTagName("w:p"));
+  const lines = paras.map(p=>{
+    const runs = Array.from(p.getElementsByTagName("w:t"));
+    return runs.map(r=>r.textContent).join("").trim();
+  }).filter(l=>l.length>0);
+  return lines;
+}
+
+function isNameLine(line){
+  if (IBAN_RE.test(line)) return false;
+  if (/\d/.test(line)) return false; // names shouldn't contain digits
+  return NAME_LINE_RE.test(line);
+}
+
+function parseRecords(lines){
+  const records = [];
+  let current = null;
+  for (const raw of lines){
+    const line = raw.trim();
+    if (isNameLine(line)){
+      if (current) records.push(current);
+      current = {name: line, iban:"", amount:null, reason:"", rawLines:[]};
+      continue;
+    }
+    if (!current){
+      // stray line before any name found — skip
+      continue;
+    }
+    current.rawLines.push(line);
+    const stripped = line.replace(/\s+/g, "");
+    const ibanMatch = stripped.match(IBAN_RE);
+    if (ibanMatch && !current.iban){
+      current.iban = ibanMatch[0].toUpperCase();
+    }
+  }
+  if (current) records.push(current);
+
+  // derive amount + reason per record from rawLines (excluding the IBAN line itself)
+  for (const rec of records){
+    let total = 0;
+    let found = false;
+    const notes = [];
+    for (const line of rec.rawLines){
+      if (IBAN_RE.test(line.replace(/\s+/g,""))) continue;
+      const nums = line.match(AMOUNT_RE);
+      if (nums){
+        found = true;
+        nums.forEach(n=> total += parseFloat(n.replace(",", ".")));
+        notes.push(line);
+      } else if (!/^\d+$/.test(line)) {
+        // keep non-pure-numeric lines as potential reason text (e.g. invoice refs)
+        notes.push(line);
+      }
+    }
+    rec.amount = found ? Math.round(total*100)/100 : null;
+    rec.reason = "Възстановяване";
+    rec.rawText = rec.rawLines.join(" | ");
+    rec.flagged = !rec.iban || rec.amount===null;
+    rec.excluded = false;
+  }
+  return records;
+}
+
+/* ---------- rendering ---------- */
+let RECORDS = [];
+
+function render(){
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  RECORDS.forEach((rec, i)=>{
+    const bicInfo = rec.iban ? guessBic(rec.iban) : {bic:"", guessed:true};
+    if (!rec.bic) rec.bic = bicInfo.bic;
+    rec.flagged = !rec.iban || rec.amount===null || !rec.bic;
+
+    const tr = document.createElement("tr");
+    tr.className = (rec.flagged?"flagged ":"") + (rec.excluded?"excluded":"");
+
+    tr.innerHTML = `
+      <td class="flagcol"><span class="excl-toggle" title="Изключи/включи от износа">${rec.excluded?"⊘":(rec.flagged?"⚑":"✓")}</span></td>
+      <td class="name"><input data-f="name" value="${escapeHtml(rec.name)}"></td>
+      <td class="iban"><input data-f="iban" value="${escapeHtml(rec.iban)}"></td>
+      <td class="bic"><input data-f="bic" value="${escapeHtml(rec.bic)}"></td>
+      <td class="amount"><input data-f="amount" value="${rec.amount===null?"":rec.amount.toFixed(2)}"></td>
+      <td class="reason"><input data-f="reason" value="${escapeHtml(rec.reason)}"></td>
+      <td class="raw"><pre>${escapeHtml(rec.rawText)}</pre></td>
+    `;
+    tr.querySelector(".excl-toggle").addEventListener("click", ()=>{
+      rec.excluded = !rec.excluded;
+      render();
+    });
+    tr.querySelectorAll("input").forEach(inp=>{
+      inp.addEventListener("input", ()=>{
+        const f = inp.dataset.f;
+        rec[f] = f==="amount" ? parseFloat(inp.value.replace(",", "."))||null : inp.value;
+        rec.flagged = !rec.iban || rec.amount===null || !rec.bic;
+        tr.className = (rec.flagged?"flagged ":"") + (rec.excluded?"excluded":"");
+      });
+    });
+    tbody.appendChild(tr);
+  });
+
+  const total = RECORDS.filter(r=>!r.excluded).length;
+  const flagged = RECORDS.filter(r=>r.flagged && !r.excluded).length;
+  const sum = RECORDS.filter(r=>!r.excluded && r.amount!==null).reduce((s,r)=>s+r.amount,0);
+  document.getElementById("summary").innerHTML = `
+    <div class="stat"><b>${total}</b>записа за износ</div>
+    <div class="stat ${flagged?"warn":""}"><b>${flagged}</b>за проверка</div>
+    <div class="stat"><b>${sum.toFixed(2)}</b>EUR общо</div>
+  `;
+  document.getElementById("results").classList.remove("hidden");
+}
+
+function escapeHtml(s){
+  return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* ---------- export ---------- */
+function activeRows(){
+  return RECORDS.filter(r=>!r.excluded);
+}
+
+function buildTxt(){
+  const rows = activeRows().map(r=>{
+    const name = (r.name||"").substring(0,35);
+    const reason = (r.reason||"").substring(0,35);
+    return `IBAN311|${name}|${r.iban}|${r.bic}|EUR|${(r.amount||0).toFixed(2)}|${reason}|`;
+  });
+  return rows.join("\r\n") + "\r\n";
+}
+
+function buildXml(){
+  const esc = s => (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const rows = activeRows().map(r=>`<PAYMENT>
+<TRANSID>IBAN311</TRANSID>
+<NAME_R>${esc(r.name)}</NAME_R>
+<IBAN_R>${esc(r.iban)}</IBAN_R>
+<BIC_R>${esc(r.bic)}</BIC_R>
+<JSUM>${(r.amount||0).toFixed(2)}</JSUM>
+<CURRENCY>EUR</CURRENCY>
+<REM_I>${esc(r.reason)}</REM_I>
+</PAYMENT>`).join("\n");
+  return `<PAYMENTS>\n${rows}\n</PAYMENTS>`;
+}
+
+/* windows-1251 encoder (Bulgarian/Russian Cyrillic block is contiguous) */
+function toCp1251Bytes(str){
+  const bytes = [];
+  for (const ch of str){
+    const code = ch.codePointAt(0);
+    let b;
+    if (code < 0x80) b = code;
+    else if (code >= 0x0410 && code <= 0x042F) b = code - 0x0410 + 0xC0;
+    else if (code >= 0x0430 && code <= 0x044F) b = code - 0x0430 + 0xE0;
+    else if (code === 0x0401) b = 0xA8; // Ё
+    else if (code === 0x0451) b = 0xB8; // ё
+    else b = 0x3F; // '?' fallback for unsupported char
+    bytes.push(b);
+  }
+  return new Uint8Array(bytes);
+}
+
+function download(filename, bytes, mime){
+  const blob = new Blob([bytes], {type:mime});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function sanitizeFilename(base){
+  return base.normalize("NFKD").replace(/[^\w\-]/g,"_");
+}
+
+document.getElementById("downloadTxt").addEventListener("click", ()=>{
+  const txt = buildTxt();
+  download(sanitizeFilename("ubb_storno")+".txt", toCp1251Bytes(txt), "text/plain");
+});
+document.getElementById("downloadXml").addEventListener("click", ()=>{
+  const xml = buildXml();
+  download(sanitizeFilename("ubb_storno")+".xml", toCp1251Bytes(xml), "application/xml");
+});
+
+/* ---------- file input wiring ---------- */
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("fileInput");
+
+dropzone.addEventListener("click", ()=> fileInput.click());
+dropzone.addEventListener("dragover", e=>{ e.preventDefault(); dropzone.classList.add("drag"); });
+dropzone.addEventListener("dragleave", ()=> dropzone.classList.remove("drag"));
+dropzone.addEventListener("drop", e=>{
+  e.preventDefault();
+  dropzone.classList.remove("drag");
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", e=>{
+  if (e.target.files.length) handleFile(e.target.files[0]);
+});
+
+async function handleFile(file){
+  if (!file.name.toLowerCase().endsWith(".docx")){
+    alert("Моля, изберете .docx файл.");
+    return;
+  }
+  const lines = await extractParagraphs(file);
+  RECORDS = parseRecords(lines);
+  render();
+}
+</script>
+</body>
+</html>
