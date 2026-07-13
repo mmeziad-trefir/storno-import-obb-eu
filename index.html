@@ -187,7 +187,7 @@ function buildReason(rec){
     if (cleaned) parts.push(cleaned);
   }
   const unique = [...new Set(parts)];
-  return unique.length ? `Сторно ${unique.join(" / ")}` : "Сторно";
+  return unique.length ? `Сторно ${unique.join(" ")}` : "Сторно";
 }
 
 async function extractParagraphs(file){
