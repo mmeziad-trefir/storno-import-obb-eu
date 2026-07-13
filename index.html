@@ -187,7 +187,7 @@ function buildReason(rec){
     if (cleaned) parts.push(cleaned);
   }
   const unique = [...new Set(parts)];
-  return unique.length ? `Сторно ${unique.join(", ")}` : "Сторно";
+  return unique.length ? `Сторно ${unique.join(" / ")}` : "Сторно";
 }
 
 async function extractParagraphs(file){
@@ -317,11 +317,20 @@ function activeRows(){
   return RECORDS.filter(r=>!r.excluded);
 }
 
+/* UBB only allows Cyrillic/Latin letters, digits, space and / - ? : ( ) . ' + in
+   NAME_R, REM_I, REM_II — anything else (commas, dashes like – —, etc.) is stripped. */
+function sanitizeField(s, maxLen){
+  let clean = (s||"").replace(/[^A-Za-zА-Яа-яЁё0-9 \/\-\?:().'+]/g, " ");
+  clean = clean.replace(/\s+/g, " ").trim();
+  return maxLen ? clean.substring(0, maxLen) : clean;
+}
+
 function buildTxt(){
   const rows = activeRows().map(r=>{
-    const name = (r.name||"").substring(0,35);
-    const reason = (r.reason||"").substring(0,35);
-    return `IBAN311|${name}|${r.iban}|${r.bic}|EUR|${(r.amount||0).toFixed(2)}|${reason}|`;
+    const name = sanitizeField(r.name, 35);
+    const reason = sanitizeField(r.reason, 35);
+    // REM_II (further notes) is optional but its | delimiter must still be present
+    return `IBAN311|${name}|${r.iban}|${r.bic}|EUR|${(r.amount||0).toFixed(2)}|${reason}||`;
   });
   return rows.join("\r\n") + "\r\n";
 }
@@ -330,12 +339,12 @@ function buildXml(){
   const esc = s => (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const rows = activeRows().map(r=>`<PAYMENT>
 <TRANSID>IBAN311</TRANSID>
-<NAME_R>${esc(r.name)}</NAME_R>
+<NAME_R>${esc(sanitizeField(r.name, 35))}</NAME_R>
 <IBAN_R>${esc(r.iban)}</IBAN_R>
 <BIC_R>${esc(r.bic)}</BIC_R>
 <JSUM>${(r.amount||0).toFixed(2)}</JSUM>
 <CURRENCY>EUR</CURRENCY>
-<REM_I>${esc(r.reason)}</REM_I>
+<REM_I>${esc(sanitizeField(r.reason, 35))}</REM_I>
 </PAYMENT>`).join("\n");
   return `<PAYMENTS>\n${rows}\n</PAYMENTS>`;
 }
