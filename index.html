@@ -163,6 +163,32 @@ const IBAN_RE = /\bBG\d{2}[A-Z]{4}[A-Z0-9]{6,}\b/i;
 const AMOUNT_RE = /\d{1,7}[.,]\d{2}\b/g;
 // a line that is essentially only letters/spaces/hyphens (a name)
 const NAME_LINE_RE = /^[A-Za-zА-Яа-яЁёЇїІіЙй\-\.\s]{3,}$/;
+const DATE_RE = /\d{1,2}\.\d{1,2}\.\d{2,4}\s*г?\.?/gi;
+
+// Strips the IBAN, any date, and any amount out of a raw line, leaving only
+// whatever else is there (invoice / reference numbers etc.)
+function leftoverText(line){
+  let s = line;
+  s = s.replace(DATE_RE, " ");
+  s = s.replace(AMOUNT_RE, " ");
+  s = s.replace(/[\/\-–—]+/g, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  s = s.replace(/^[.,:;]+|[.,:;]+$/g, "").trim();
+  return s;
+}
+
+// Builds the "основание" text from whatever in the block wasn't already used
+// for name / IBAN / amount / date — never repeats those. Always starts with "Сторно".
+function buildReason(rec){
+  const parts = [];
+  for (const line of rec.rawLines){
+    if (IBAN_RE.test(line.replace(/\s+/g, ""))) continue; // skip the IBAN line itself
+    const cleaned = leftoverText(line);
+    if (cleaned) parts.push(cleaned);
+  }
+  const unique = [...new Set(parts)];
+  return unique.length ? `Сторно ${unique.join(", ")}` : "Сторно";
+}
 
 async function extractParagraphs(file){
   const buf = await file.arrayBuffer();
@@ -172,7 +198,7 @@ async function extractParagraphs(file){
   const paras = Array.from(doc.getElementsByTagName("w:p"));
   const lines = paras.map(p=>{
     const runs = Array.from(p.getElementsByTagName("w:t"));
-    return runs.map(r=>r.textContent).join("").trim();
+    return runs.map(r=>r.textContent).join("").replace(/\s+/g, " ").trim();
   }).filter(l=>l.length>0);
   return lines;
 }
@@ -224,7 +250,7 @@ function parseRecords(lines){
       }
     }
     rec.amount = found ? Math.round(total*100)/100 : null;
-    rec.reason = "Възстановяване";
+    rec.reason = buildReason(rec);
     rec.rawText = rec.rawLines.join(" | ");
     rec.flagged = !rec.iban || rec.amount===null;
     rec.excluded = false;
