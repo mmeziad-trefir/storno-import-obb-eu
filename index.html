@@ -239,7 +239,8 @@ function parseRecords(lines){
     const notes = [];
     for (const line of rec.rawLines){
       if (IBAN_RE.test(line.replace(/\s+/g,""))) continue;
-      const nums = line.match(AMOUNT_RE);
+      const lineNoDate = line.replace(DATE_RE, " ");
+      const nums = lineNoDate.match(AMOUNT_RE);
       if (nums){
         found = true;
         nums.forEach(n=> total += parseFloat(n.replace(",", ".")));
