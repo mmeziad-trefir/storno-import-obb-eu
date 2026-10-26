@@ -289,19 +289,45 @@ const translit = s => toLatin(s).toUpperCase();
 const hasCyrillic = s => new RegExp(`[${CYR}]`).test(s||"");
 
 /* ---------- parsing ---------- */
-const AMOUNT_RE = /\d{1,7}[.,]\d{2}\b/g;
+// Amounts with decimals: 24.12, 9.5, 9,50 (1 or 2 decimal places). Not part of a longer number.
+const AMOUNT_RE = /(?<![\d.,])\d{1,7}[.,]\d{1,2}(?![\d])/g;
+// A line holding only a whole number (≤ 5 digits), optionally with a currency: "9", "18 лв.", "€ 25".
+// Reference numbers in the list are 6+ digits, so they don't match.
+const INT_AMOUNT_LINE_RE = /^(?:€|EUR|лв\.?)?\s*(\d{1,5})\s*(?:€|EUR|евро|лв\.?|lv\.?)?$/i;
+// A line that is just one decimal amount, possibly with thousands separators and currency: "1 234,56 лв."
+const DEC_AMOUNT_LINE_RE = /^(?:€|EUR|лв\.?)?\s*(?:\d{1,3}(?:[ . ]\d{3})+|\d{1,7})[.,]\d{1,2}\s*(?:€|EUR|евро|лв\.?|lv\.?)?$/i;
+const CURRENCY_RE = /(лв\.?|lv\.?|EUR|евро|€)/gi;
+
+// Turns whatever was typed into a number: "9" → 9, "9.5" / "9,5" → 9.5, "1 234,56" / "1.234,56" → 1234.56.
+function parseAmount(s){
+  const t = (s||"").replace(/[^\d.,]/g, "").replace(/[.,]+$/, "");
+  if (!t) return null;
+  const last = Math.max(t.lastIndexOf("."), t.lastIndexOf(","));
+  let v;
+  if (last < 0) v = Number(t);
+  else {
+    const intPart = t.slice(0, last).replace(/[.,]/g, ""), dec = t.slice(last + 1);
+    if (dec.length === 3) v = Number(intPart + dec);         // "1.234" → thousands separator
+    else if (dec.length > 3) return null;
+    else v = Number((intPart || "0") + "." + dec);
+  }
+  return isFinite(v) && v > 0 ? Math.round(v * 100) / 100 : null;
+}
+// Refunds above this amount get a yellow "check" warning (still exported). Change the number here if needed.
+const HIGH_AMOUNT = 100;
+const fmtAmount = v => v === null || v === undefined ? "" : v.toFixed(2);
 const NAME_LINE_RE = /^[A-Za-zА-Яа-яЁёЇїІіЙй\-\.\s]{3,}$/;
 const DATE_RE = /\d{1,2}\.\d{1,2}\.\d{2,4}\s*г?\.?/gi;
 const hasIban = line => IBAN_RE.test(line.replace(/\s+/g, ""));
 
 function leftoverText(line){
-  let s = line.replace(DATE_RE, " ").replace(AMOUNT_RE, " ").replace(/[\/\-–—]+/g, " ").replace(/\s+/g, " ").trim();
+  let s = line.replace(DATE_RE, " ").replace(AMOUNT_RE, " ").replace(CURRENCY_RE, " ").replace(/[\/\-–—]+/g, " ").replace(/\s+/g, " ").trim();
   return s.replace(/^[.,:;]+|[.,:;]+$/g, "").trim();
 }
 function buildReason(rec){
   const parts = [];
   for (const line of rec.rawLines){
-    if (hasIban(line)) continue;
+    if (hasIban(line) || (rec.amountLines || []).includes(line)) continue;
     const c = leftoverText(line);
     if (c) parts.push(c);
   }
@@ -368,12 +394,30 @@ function parseRecords(lines){
 
   for (const rec of records){
     let total = 0, found = false;
+    rec.amountLines = [];
     for (const line of rec.rawLines){
       if (hasIban(line)) continue;
+      if (DEC_AMOUNT_LINE_RE.test(line)){          // whole line is an amount, e.g. "1 234,56 лв."
+        found = true; total += parseAmount(line.replace(CURRENCY_RE, "")) || 0;
+        rec.amountLines.push(line);
+        continue;
+      }
       const nums = line.replace(DATE_RE, " ").match(AMOUNT_RE);
-      if (nums){ found = true; nums.forEach(n => total += parseFloat(n.replace(",", "."))); }
+      if (nums){ found = true; nums.forEach(n => total += parseAmount(n) || 0); }
     }
     rec.amount = found ? Math.round(total*100)/100 : null;
+    rec.amountWhole = false;
+    // No decimal amount found: accept a whole number ("9", "18 лв.") if it's the last line of the block.
+    if (!found){
+      const rest = rec.rawLines.filter(l => !hasIban(l));
+      const last = rest[rest.length - 1] || "";
+      const m = last.match(INT_AMOUNT_LINE_RE);
+      if (m && Number(m[1]) > 0){
+        rec.amount = Number(m[1]);
+        rec.amountLines.push(last); // keep it out of the payment reason
+        rec.amountWhole = true;    // shown as a "check the amount" warning until edited
+      }
+    }
     rec.reasonFull = buildReason(rec);
     rec.rawText = rec.rawLines.join(" | ");
     finishRecord(rec);
@@ -414,6 +458,9 @@ function problems(r){
   if (!ic.ok) p.push({block:true, label:ic.error, suggestion:ic.suggestion});
   else if (ic.warn) p.push({block:false, label:ic.warn});
   if (r.amount === null || !(r.amount > 0)) p.push({block:true, label:"Липсва сума"});
+  else if (r.amountWhole) p.push({block:false, label:`Сумата е разчетена като цяло число (${fmtAmount(r.amount)}) – проверете`});
+  if (r.amount > HIGH_AMOUNT && r.amount < 15000)
+    p.push({block:false, label:`Сума над ${HIGH_AMOUNT} EUR – проверете дали е правилна`});
   else if (r.amount >= 15000){
     const d = foreign ? swiftField(r.decl) : sanitizeField(r.decl);
     if (!d) p.push({block:true, label:"Сума ≥ 15 000 EUR – попълнете декларация за произход"});
@@ -520,7 +567,7 @@ function render(focusRec){
       <td class="iban"><input data-f="iban" placeholder="IBAN" value="${escapeHtml(rec.iban)}"><div class="suggest hidden"></div></td>
       <td class="bic"><input data-f="bic" placeholder="BIC" value="${escapeHtml(rec.bic)}"></td>
       <td class="amount">
-        <input data-f="amount" placeholder="0.00" value="${rec.amount === null ? "" : rec.amount.toFixed(2)}">
+        <input data-f="amount" placeholder="0.00" title="Може да въведете 9, 9.5, 9,5 – форматира се до 9.50" value="${fmtAmount(rec.amount)}">
         <input data-f="decl" class="sub decl" maxlength="50" placeholder="Декларация за произход на средствата" value="${escapeHtml(rec.decl)}">
       </td>
       <td class="reason"><input data-f="reason" value="${escapeHtml(rec.reason)}"></td>
@@ -560,6 +607,10 @@ function render(focusRec){
     tr.querySelector(".incbox").addEventListener("change", e => {
       rec.excluded = !e.target.checked; refresh(); renderSummary();
     });
+    // When leaving the amount field, show it in the bank format: 9 → 9.00, 9,5 → 9.50
+    tr.querySelector('[data-f="amount"]').addEventListener("change", e => {
+      if (rec.amount !== null) e.target.value = fmtAmount(rec.amount);
+    });
     tr.querySelector(".suggest").addEventListener("click", e => {
       if (!e.target.classList.contains("usebtn")) return;
       const sug = (problems(rec).find(x => x.suggestion) || {}).suggestion;
@@ -575,7 +626,7 @@ function render(focusRec){
     tr.querySelectorAll("input[data-f]").forEach(inp => {
       inp.addEventListener("input", () => {
         const f = inp.dataset.f;
-        if (f === "amount") rec.amount = parseFloat(inp.value.replace(",", ".")) || null;
+        if (f === "amount"){ rec.amount = parseAmount(inp.value); rec.amountWhole = false; }
         else if (f === "iban"){
           rec.iban = normalizeIban(inp.value);
           rec.bic = guessBic(rec.iban);
