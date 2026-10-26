@@ -125,7 +125,7 @@
     <table>
       <thead><tr>
         <th class="inc"><input type="checkbox" id="incAll" title="Включи/изключи всички"></th>
-        <th>Статус</th><th>Тип</th><th>Име на бенефициент</th><th>IBAN</th><th>BIC</th><th>Сума (EUR)</th><th>Основание</th><th>Адрес (само извън ЕС/ЕИП)</th><th>Суров текст</th><th></th>
+        <th>Статус</th><th>Тип</th><th>Име на бенефициент</th><th>IBAN</th><th>BIC</th><th>Сума (EUR)</th><th>Основание</th><th>Чужбина: банка / адрес</th><th>Суров текст</th><th></th>
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -254,17 +254,17 @@ const BIC_TABLE = {
 };
 // For codes not in the table the BIC is guessed as code + "BGSF"; such rows get a "check the BIC" warning.
 const bicIsGuess = (iban, bic) => isBG(iban) && !BIC_TABLE[(iban||"").substr(4,4)] && cleanBic(bic) === (iban||"").substr(4,4) + "BGSF";
-// Foreign banks: [country, bank code at IBAN position 5+, BIC, bank name (BENBANK1, max 35), bank city (CITY, max 17)].
-// Extend as needed; verify before relying on them.
+// Foreign banks checked by hand (addresses from each bank's own legal/imprint page, Oct 2026):
+// [country, bank code at IBAN position 5+, BIC, name (BENBANK1, max 35), city (CITY, max 17), address (BENBANK2, max 35)]
 const FOREIGN_BIC = [
-  ["LT","32500","REVOLT21XXX","REVOLUT BANK UAB","VILNIUS"],      // Revolut (EU IBANs)
-  ["IE","REVO","REVOIE23XXX","REVOLUT BANK UAB IRELAND BRANCH","DUBLIN"], // Revolut Irish IBANs
-  ["FR","28233","REVOFRP2XXX","REVOLUT BANK UAB FRANCE","PARIS"], // Revolut French IBANs
-  ["GB","REVO","REVOGB21XXX","REVOLUT LTD","LONDON"],             // Revolut UK (outside EU/EEA – address required)
-  ["LT","35000","EVIULT2VXXX","PAYSERA LT UAB","VILNIUS"],        // Paysera
-  ["DE","10011001","NTSBDEB1XXX","N26 BANK AG","BERLIN"],         // N26
-  ["BE","967","TRWIBEB1XXX","WISE EUROPE SA","BRUSSELS"],         // Wise
-  ["NL","BUNQ","BUNQNL2AXXX","BUNQ B.V.","AMSTERDAM"]             // bunq
+  ["LT","32500","REVOLT21XXX","REVOLUT BANK UAB","VILNIUS","KONSTITUCIJOS AVE. 21B"],               // Revolut (EU IBANs)
+  ["IE","REVO","REVOIE23XXX","REVOLUT BANK UAB IRELAND BRANCH","DUBLIN","2 DUBLIN LANDINGS NORTH DOCK"], // Revolut Irish IBANs
+  ["FR","28233","REVOFRP2XXX","REVOLUT FRANCE SUCC. REVOLUT BANK","PARIS","10 AVENUE KLEBER"],     // Revolut French IBANs
+  ["GB","REVO","REVOGB21XXX","REVOLUT LTD","LONDON","30 SOUTH COLONNADE"],                         // Revolut UK (outside EU/EEA)
+  ["LT","35000","EVIULT2VXXX","PAYSERA LT UAB","VILNIUS","PILAITES PR. 16"],                       // Paysera
+  ["DE","10011001","NTSBDEB1XXX","N26 BANK SE","BERLIN","VOLTAIRESTRASSE 8"],                      // N26
+  ["BE","967","TRWIBEB1XXX","WISE EUROPE SA","BRUSSELS","RUE DU TRONE 100"],                       // Wise
+  ["NL","BUNQ","BUNQNL2AXXX","BUNQ B.V.","AMSTERDAM","BASISWEG 32"]                                // bunq
 ];
 const foreignBank = iban => {
   const s = (iban||"").toUpperCase();
@@ -300,8 +300,15 @@ const bankKey = iban => {
   const rk = regKey(s);
   return s.slice(0,2) + (rk !== null ? rk : s.slice(4, 4 + (BANK_CODE_LEN[s.slice(0,2)] || 4)));
 };
+// Bank details you enter are remembered per bank: {bic, name, addr, city}
 const LEARN_KEY = "matstar_ubb_learned_bic";
-function loadLearned(){ try { return JSON.parse(localStorage.getItem(LEARN_KEY) || "{}"); } catch(e){ return {}; } }
+function loadLearned(){
+  try {
+    const m = JSON.parse(localStorage.getItem(LEARN_KEY) || "{}");
+    for (const k in m) if (typeof m[k] === "string") m[k] = {bic: m[k]};   // older format: just the BIC
+    return m;
+  } catch(e){ return {}; }
+}
 function saveLearned(map){ try { localStorage.setItem(LEARN_KEY, JSON.stringify(map)); } catch(e){} }
 let LEARNED_BIC = loadLearned();
 function guessBic(iban){
@@ -315,18 +322,33 @@ function guessBic(iban){
   // Priority: verified built-in list → BIC you entered before → national bank directory
   const hit = foreignBank(s);
   if (hit) return hit[2];
-  if (LEARNED_BIC[bankKey(s)]) return LEARNED_BIC[bankKey(s)];
+  const learned = LEARNED_BIC[bankKey(s)];
+  if (learned && learned.bic) return learned.bic;
   const reg = registryBank(s);
   return reg ? reg.bic : "";
 }
-// Bank name for display and for BENBANK1 (only when the BIC in the row matches the looked-up bank)
-function bankInfo(iban, bic){
-  if (!iban || isBG(iban)) return null;
+// Recipient bank's name, address and city (BENBANK1, BENBANK2, CITY) for a foreign IBAN + BIC.
+// Checked list first; otherwise the directory's name, topped up with what you entered before for this bank.
+function bankDetails(iban, bic){
+  const out = {name:"", addr:"", city:""};
+  if (!iban || isBG(iban)) return out;
   const b = cleanBic(bic), cur = foreignBank(iban);
-  if (cur && cur[2] === b) return {name: cur[3], city: cur[4]};
+  if (cur && cur[2] === b) return {name: cur[3], addr: cur[5], city: cur[4]};
   const reg = registryBank(iban);
-  if (reg && reg.bic === b) return {name: reg.name, city: ""};
-  return null;
+  if (reg && reg.bic === b) out.name = reg.name;
+  const l = LEARNED_BIC[bankKey(iban)];
+  if (l && (!l.bic || l.bic === b)){
+    if (l.name) out.name = l.name;
+    if (l.addr) out.addr = l.addr;
+    if (l.city) out.city = l.city;
+  }
+  return out;
+}
+// Fills the row's bank fields automatically unless you've typed them yourself.
+function fillBank(rec){
+  if (rec.bankManual) return;
+  const d = bankDetails(rec.iban, rec.bic);
+  rec.bankName = d.name; rec.bankAddr = d.addr; rec.bankCity = d.city;
 }
 
 /* ---------- Cyrillic → Latin ---------- */
@@ -421,6 +443,7 @@ function finishRecord(rec){
   if (rec.reasonFull === undefined) rec.reasonFull = rec.reason || "Сторно";
   rec.reasonManual = false;            // true once the user edits the reason, so the switch won't overwrite it
   rec.reason = autoReason(rec);
+  rec.bankManual = false; fillBank(rec);   // recipient bank name/address/city for SWIFT
   rec.nameLatin = toLatin(rec.name);   // suggested Latin spelling for SWIFT; editable
   rec.nameLatinManual = false;         // true once the user edits it, so it isn't overwritten
   rec.excluded = false;
@@ -543,6 +566,8 @@ function problems(r){
   } else if (bicIsGuess(r.iban, bic)){
     p.push({block:false, label:"Непознат код на банка – BIC е предположен, проверете го"});
   }
+  if (foreign && (!swiftField(r.bankName) || !swiftField(r.bankAddr) || !swiftField(r.bankCity)))
+    p.push({block:true, label:"Попълнете банката на получателя: име, адрес и град (запомнят се за тази банка)"});
   if (foreign && !isEEA(r.iban)){
     if (!swiftField(r.adr1) || !swiftField(r.adr3) || !/^[A-Z]{2}$/.test((r.adr2||"").toUpperCase()))
       p.push({block:true, label:"Извън ЕС/ЕИП – нужен е адрес (улица, град, държава)"});
@@ -631,14 +656,21 @@ function render(focusRec){
         <div class="prob"></div>
       </td>
       <td class="iban"><input data-f="iban" placeholder="IBAN" value="${escapeHtml(rec.iban)}"><div class="suggest hidden"></div></td>
-      <td class="bic"><input data-f="bic" placeholder="BIC" value="${escapeHtml(rec.bic)}"><div class="bankname"></div></td>
+      <td class="bic"><input data-f="bic" placeholder="BIC" value="${escapeHtml(rec.bic)}"></td>
       <td class="amount">
         <input data-f="amount" placeholder="0.00" title="Може да въведете 9, 9.5, 9,5 – форматира се до 9.50" value="${fmtAmount(rec.amount)}">
         <input data-f="decl" class="sub decl" maxlength="50" placeholder="Декларация за произход на средствата" value="${escapeHtml(rec.decl)}">
       </td>
       <td class="reason"><input data-f="reason" value="${escapeHtml(rec.reason)}"></td>
       <td class="addrcol">
+        <div class="bankblk">
+          <span class="latinlbl">Банка на получателя:</span>
+          <input data-f="bankName" maxlength="35" placeholder="Име на банката" value="${escapeHtml(rec.bankName)}">
+          <input data-f="bankAddr" class="sub" maxlength="35" placeholder="Адрес на банката" value="${escapeHtml(rec.bankAddr)}">
+          <input data-f="bankCity" class="sub" maxlength="17" placeholder="Град на банката" value="${escapeHtml(rec.bankCity)}">
+        </div>
         <div class="addr">
+          <span class="latinlbl" style="margin-top:8px;">Адрес на получателя (извън ЕС/ЕИП):</span>
           <input data-f="adr1" maxlength="70" placeholder="Улица и номер" value="${escapeHtml(rec.adr1)}">
           <input data-f="adr3" class="sub" maxlength="35" placeholder="Град" value="${escapeHtml(rec.adr3)}">
           <input data-f="adr2" class="sub" maxlength="2" placeholder="Държава (напр. GB)" value="${escapeHtml(rec.adr2)}">
@@ -658,19 +690,26 @@ function render(focusRec){
       probEl.textContent = p.map(x => x.label).join(" · ");
       probEl.className = "prob" + (p.some(x => x.block) ? "" : " soft");
       tr.querySelector(".type").innerHTML = typeBadge(rec);
-      const bi = bankInfo(rec.iban, rec.bic);
-      tr.querySelector(".bankname").textContent = bi ? bi.name : "";
       const sug = (p.find(x => x.suggestion) || {}).suggestion;
       const sugEl = tr.querySelector(".suggest");
       sugEl.classList.toggle("hidden", !sug);
       if (sug) sugEl.innerHTML = `Може би: <b>${escapeHtml(sug)}</b> <button class="usebtn" type="button">Използвай</button>`;
       tr.querySelector(".latinwrap").classList.toggle("hidden", !(rec.iban && !isBG(rec.iban)));
-      const needsAddr = rec.iban && !isBG(rec.iban) && !isEEA(rec.iban);
+      const foreign = !!(rec.iban && !isBG(rec.iban));
+      const needsAddr = foreign && !isEEA(rec.iban);
+      tr.querySelector(".bankblk").classList.toggle("hidden", !foreign);
       tr.querySelector(".addr").classList.toggle("hidden", !needsAddr);
-      tr.querySelector(".na").classList.toggle("hidden", !!needsAddr);
+      tr.querySelector(".na").classList.toggle("hidden", foreign);
       tr.querySelector(".decl").classList.toggle("hidden", !(rec.amount >= 15000));
     };
     tr._refresh = refresh;
+    // Put the row's current BIC and bank details back into the inputs (after automatic filling)
+    tr._syncBank = () => {
+      tr.querySelector('[data-f="bic"]').value = rec.bic || "";
+      tr.querySelector('[data-f="bankName"]').value = rec.bankName || "";
+      tr.querySelector('[data-f="bankAddr"]').value = rec.bankAddr || "";
+      tr.querySelector('[data-f="bankCity"]').value = rec.bankCity || "";
+    };
 
     tr.querySelector(".incbox").addEventListener("change", e => {
       rec.excluded = !e.target.checked; refresh(); renderSummary();
@@ -698,7 +737,8 @@ function render(focusRec){
         else if (f === "iban"){
           rec.iban = normalizeIban(inp.value);
           rec.bic = guessBic(rec.iban);
-          tr.querySelector('[data-f="bic"]').value = rec.bic;
+          rec.bankManual = false; fillBank(rec);
+          tr._syncBank();
           if (!rec.adr2){ rec.adr2 = defaultCountry(rec.iban); tr.querySelector('[data-f="adr2"]').value = rec.adr2; }
         } else if (f === "name"){
           rec.name = inp.value;
@@ -713,22 +753,15 @@ function render(focusRec){
           if (!rec.nameLatinManual){ rec.nameLatin = toLatin(rec.name); }
         } else if (f === "bic"){
           rec.bic = inp.value;
-          const bic = cleanBic(rec.bic);
-          // Remember a BIC typed for a foreign bank that isn't in the built-in list
-          // (also when it corrects what the national directory suggested)
-          const reg = registryBank(rec.iban);
-          if (rec.iban && !isBG(rec.iban) && !foreignBank(rec.iban) && ibanValid(rec.iban) && BIC_FMT.test(bic)
-              && !(reg && reg.bic === bic)){
-            const key = bankKey(rec.iban);
-            LEARNED_BIC[key] = bic; saveLearned(LEARNED_BIC); updateForgetBtn();
-            // Fill other rows from the same bank that have no BIC yet
-            document.querySelectorAll("#tbody tr").forEach(other => {
-              const o = other._rec;
-              if (o !== rec && o.iban && !isBG(o.iban) && bankKey(o.iban) === key && !cleanBic(o.bic)){
-                o.bic = bic; other.querySelector('[data-f="bic"]').value = bic; other._refresh();
-              }
-            });
+          if (!rec.bankManual){
+            fillBank(rec);
+            ["bankName","bankAddr","bankCity"].forEach(k => tr.querySelector(`[data-f="${k}"]`).value = rec[k] || "");
           }
+          learnBank(rec, tr);
+        } else if (f === "bankName" || f === "bankAddr" || f === "bankCity"){
+          rec[f] = inp.value;
+          rec.bankManual = true;
+          learnBank(rec, tr);
         } else if (f === "reason"){
           rec.reason = inp.value;
           rec.reasonManual = true;
@@ -756,13 +789,35 @@ document.getElementById("incAll").addEventListener("change", e => {
   renderSummary();
 });
 document.getElementById("viewFilter").addEventListener("change", applyFilter);
+/* Remembers what you entered for a foreign bank (BIC, name, address, city) for this browser,
+   and fills it into other rows from the same bank. Banks in the checked list don't need it. */
+function learnBank(rec, tr){
+  if (!rec.iban || isBG(rec.iban) || !ibanValid(rec.iban) || foreignBank(rec.iban)) return;
+  const key = bankKey(rec.iban), bic = cleanBic(rec.bic);
+  const entry = Object.assign({}, LEARNED_BIC[key]);
+  const reg = registryBank(rec.iban);
+  if (BIC_FMT.test(bic) && !(reg && reg.bic === bic)) entry.bic = bic;
+  if (rec.bankManual){
+    for (const [k, f] of [["name","bankName"],["addr","bankAddr"],["city","bankCity"]])
+      if ((rec[f]||"").trim()) entry[k] = rec[f].trim();
+  }
+  if (!Object.keys(entry).length) return;
+  LEARNED_BIC[key] = entry; saveLearned(LEARNED_BIC); updateForgetBtn();
+  document.querySelectorAll("#tbody tr").forEach(other => {
+    const o = other._rec;
+    if (o === rec || !o.iban || isBG(o.iban) || bankKey(o.iban) !== key) return;
+    if (!cleanBic(o.bic) && entry.bic) o.bic = entry.bic;
+    if (!o.bankManual) fillBank(o);
+    other._syncBank(); other._refresh();
+  });
+}
 function updateForgetBtn(){
   const n = Object.keys(LEARNED_BIC).length;
   const b = document.getElementById("forgetBic");
-  b.textContent = `Забрави запомнените BIC (${n})`; b.classList.toggle("hidden", !n);
+  b.textContent = `Забрави запомнените банки (${n})`; b.classList.toggle("hidden", !n);
 }
 document.getElementById("forgetBic").addEventListener("click", () => {
-  if (!confirm("Да изтрия ли всички BIC кодове, запомнени в този браузър? Вградените (Revolut, Wise, N26 и др.) остават.")) return;
+  if (!confirm("Да изтрия ли всички данни за банки (BIC, име, адрес, град), запомнени в този браузър? Вградените (Revolut, Wise, N26 и др.) остават.")) return;
   LEARNED_BIC = {}; saveLearned(LEARNED_BIC); updateForgetBtn();
 });
 document.getElementById("reasonMode").addEventListener("change", e => {
@@ -808,12 +863,10 @@ function euPayment(r){
     add("ADR2", (r.adr2||"").toUpperCase());
     add("ADR3", swiftField(r.adr3, 35));
   }
-  // Field 57 – recipient's bank. COUNTRY is required by UBB: the bank's country is the IBAN's country code.
-  const bank = bankInfo(r.iban, r.bic);
-  if (bank){
-    add("BENBANK1", swiftField(bank.name, 35));
-    add("CITY", swiftField(bank.city, 17));
-  }
+  // Field 57 – recipient's bank: name, address, city, country (UBB asks for all of them).
+  add("BENBANK1", swiftField(r.bankName, 35));
+  add("BENBANK2", swiftField(r.bankAddr, 35));
+  add("CITY", swiftField(r.bankCity, 17));
   add("COUNTRY", ibanCountry(r.iban));
   add("REM_I", swiftField(r.reason, 35));
   add("BENEF", BENEF === "A NON-RESIDENT" ? "A NON-RESIDENT" : "A RESIDENT");
@@ -833,7 +886,7 @@ function csvCell(v){
   return /[";\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function buildCsv(rows){
-  const head = ["Статус","Причина / проблеми","Име","Име (латиница)","IBAN","BIC","Сума EUR","Основание","Тип","Декларация","Адрес","Град","Държава","Суров текст"];
+  const head = ["Статус","Причина / проблеми","Име","Име (латиница)","IBAN","BIC","Сума EUR","Основание","Тип","Декларация","Адрес","Град","Държава","Банка","Адрес на банката","Град на банката","Суров текст"];
   const lines = [head];
   rows.forEach(r => {
     const st = statusOf(r);
@@ -842,7 +895,8 @@ function buildCsv(rows){
       STATUS_LABEL[st], issues, r.name, (r.iban && !isBG(r.iban)) ? r.nameLatin : "", r.iban, cleanBic(r.bic),
       r.amount === null ? "" : r.amount.toFixed(2).replace(".", ","),
       r.reason, !r.iban ? "" : (isBG(r.iban) ? "BG" : ibanCountry(r.iban)),
-      r.decl, r.adr1, r.adr3, r.adr2, r.rawText
+      r.decl, r.adr1, r.adr3, r.adr2,
+      ...((r.iban && !isBG(r.iban)) ? [r.bankName, r.bankAddr, r.bankCity] : ["","",""]), r.rawText
     ]);
   });
   return "﻿" + lines.map(l => l.map(csvCell).join(";")).join("\r\n") + "\r\n";
