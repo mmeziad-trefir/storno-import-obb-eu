@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Мат Стар → ОББ файл за възстановявания</title>
+<title>Мат Стар → ОББ файл за възстановявания v2</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root{--paper:#f6f4ef;--ink:#1f2a24;--ledger:#2e4d3f;--ledger-light:#4a7461;--flag:#b3441c;--flag-bg:#fbe9e1;--warn:#8a6d1c;--warn-bg:#fdf6e3;--line:#d8d2c4;--eu:#1d4f91;--ok:#2e7d4f;
@@ -14,6 +14,7 @@
   header{border-bottom:2px solid var(--ledger);padding-bottom:16px;margin-bottom:28px;}
   h1{font-family:var(--serif);font-weight:600;font-size:28px;margin:0 0 6px;color:var(--ledger);}
   header p{margin:0;color:#5a5a52;font-size:13.5px;line-height:1.5;max-width:780px;}
+  .framewarn{background:var(--flag-bg);border:1px solid var(--flag);color:var(--flag);border-radius:3px;padding:10px 14px;font-size:12.5px;margin-bottom:16px;line-height:1.5;}
   .dropzone{border:2px dashed var(--ledger-light);border-radius:4px;padding:32px 20px;text-align:center;background:#fff;cursor:pointer;margin-bottom:20px;}
   .dropzone.drag{background:#eef4ef;border-color:var(--ledger);}
   .dropzone strong{display:block;font-family:var(--serif);font-size:17px;color:var(--ledger);margin-bottom:4px;}
@@ -82,6 +83,10 @@
     <h1>Файл за импорт в ОББ (eBB)</h1>
     <p>Пуснете .docx списъка с клиенти за възстановяване. Инструментът разпознава име, IBAN и суми и генерира .txt „Превод в евро в страната" (IBAN311) за български IBAN и .xml „Междубанкови кредитни преводи" (SWIFT) за чуждестранни IBAN (Revolut, N26, Wise и др.). Всички полета в таблицата могат да се редактират.</p>
   </header>
+
+  <div id="frameWarn" class="framewarn hidden">
+    ⚠ Инструментът е отворен в преглед, а не директно в браузъра. Тук изтеглените файлове може да нямат име и разширение (.txt / .xml). Запазете .html файла на компютъра и го отворете с двоен клик в Chrome или Edge.
+  </div>
 
   <div class="dropzone" id="dropzone">
     <strong>Пуснете .docx файла тук, или кликнете за избор</strong>
@@ -244,13 +249,18 @@ const BIC_TABLE = {
 };
 // For codes not in the table the BIC is guessed as code + "BGSF"; such rows get a "check the BIC" warning.
 const bicIsGuess = (iban, bic) => isBG(iban) && !BIC_TABLE[(iban||"").substr(4,4)] && cleanBic(bic) === (iban||"").substr(4,4) + "BGSF";
-// Foreign banks: [country, bank code at IBAN position 5+, BIC]. Extend as needed; verify before relying on them.
+// Foreign banks: [country, bank code at IBAN position 5+, BIC, bank name (BENBANK1, max 35), bank city (CITY, max 17)].
+// Extend as needed; verify before relying on them.
 const FOREIGN_BIC = [
-  ["LT","32500","REVOLT21XXX"],    // Revolut (EU IBANs)
-  ["GB","REVO","REVOGB21XXX"],     // Revolut UK (outside EU/EEA – address required)
-  ["DE","10011001","NTSBDEB1XXX"], // N26
-  ["BE","967","TRWIBEB1XXX"]       // Wise
+  ["LT","32500","REVOLT21XXX","REVOLUT BANK UAB","VILNIUS"],      // Revolut (EU IBANs)
+  ["GB","REVO","REVOGB21XXX","REVOLUT LTD","LONDON"],             // Revolut UK (outside EU/EEA – address required)
+  ["DE","10011001","NTSBDEB1XXX","N26 BANK AG","BERLIN"],         // N26
+  ["BE","967","TRWIBEB1XXX","WISE EUROPE SA","BRUSSELS"]          // Wise
 ];
+const foreignBank = iban => {
+  const s = (iban||"").toUpperCase();
+  return FOREIGN_BIC.find(([cc,code]) => s.startsWith(cc) && s.slice(4).startsWith(code));
+};
 function guessBic(iban){
   const s = (iban||"").toUpperCase().replace(/\s/g,"");
   if (!s) return "";
@@ -713,6 +723,13 @@ function euPayment(r){
     add("ADR2", (r.adr2||"").toUpperCase());
     add("ADR3", swiftField(r.adr3, 35));
   }
+  // Field 57 – recipient's bank. COUNTRY is required by UBB: the bank's country is the IBAN's country code.
+  const bank = foreignBank(r.iban);
+  if (bank && cleanBic(r.bic) === bank[2]){
+    add("BENBANK1", bank[3]);
+    add("CITY", bank[4]);
+  }
+  add("COUNTRY", ibanCountry(r.iban));
   add("REM_I", swiftField(r.reason, 35));
   add("BENEF", BENEF === "A NON-RESIDENT" ? "A NON-RESIDENT" : "A RESIDENT");
   add("JSUM", r.amount.toFixed(2));
@@ -762,17 +779,31 @@ function toCp1251Bytes(str){
   }
   return new Uint8Array(bytes);
 }
+// Bank files are sent as a generic binary type so no browser renames or "corrects" the extension.
+// The link stays in the page for a moment; removing it instantly can cancel the download in some browsers.
 function download(filename, data, mime){
+  const url = URL.createObjectURL(new File([data], filename, {type: mime}));
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([data], {type: mime}));
+  a.href = url;
   a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 2000);
 }
 const stamp = () => new Date().toISOString().slice(0,10);
+const stampPlain = () => stamp().replace(/-/g, "");   // UBB: no special characters in file names
 document.getElementById("downloadBg").addEventListener("click", () =>
-  download("ubb_storno_bg.txt", toCp1251Bytes(buildBgTxt()), "text/plain"));
+  download(`ubb_storno_bg_${stampPlain()}.txt`, toCp1251Bytes(buildBgTxt()), "application/octet-stream"));
 document.getElementById("downloadEu").addEventListener("click", () =>
-  download("ubb_storno_eu.xml", toCp1251Bytes(buildEuXml()), "application/xml"));
+  download(`ubb_storno_eu_${stampPlain()}.xml`, toCp1251Bytes(buildEuXml()), "application/octet-stream"));
+
+// Opened inside a preview frame (e.g. a file preview in another app)? Downloads there can lose their name.
+try {
+  if (window.top !== window.self) document.getElementById("frameWarn").classList.remove("hidden");
+} catch (e) {
+  document.getElementById("frameWarn").classList.remove("hidden");
+}
 document.getElementById("downloadOut").addEventListener("click", () =>
   download(`nevklyucheni_${stamp()}.csv`, buildCsv(outRows()), "text/csv;charset=utf-8"));
 document.getElementById("downloadAll").addEventListener("click", () =>
