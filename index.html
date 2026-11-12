@@ -77,6 +77,9 @@
   td.iban input{min-width:190px; letter-spacing:.02em;}
   td.bic input{width:90px;}
   td.amount input{width:75px; text-align:right;}
+  td.reason{min-width:200px;}
+  td.reason .len{font-size:10.5px; color:#9a9a90; padding-left:4px;}
+  td.reason .len.over{color:var(--flag); font-weight:600;}
   td.flagcol{width:26px; text-align:center;}
   td.raw{color:#8a8a80; font-size:11px; max-width:220px;}
   td.raw pre{white-space:pre-wrap; margin:0; font-family:var(--mono);}
@@ -103,7 +106,7 @@
 <div class="wrap">
   <header>
     <h1>Файл за импорт в ОББ (eBB)</h1>
-    <p>Пуснете тук .docx списъка с клиенти за възстановяване. Инструментът разпознава име, IBAN и суми, показва резултата за проверка и генерира .txt файл във формат „Превод в евро в страната" (IBAN311) за импорт в ОББ Business Banking.</p>
+    <p>Пуснете тук .docx списъка с клиенти за възстановяване. Инструментът разпознава име, IBAN, номер на връщане и суми, показва резултата за проверка и генерира .txt файл във формат „Превод в евро в страната" (IBAN311) за импорт в ОББ Business Banking.</p>
   </header>
 
   <div class="dropzone" id="dropzone">
@@ -135,7 +138,7 @@
       <button id="downloadXml" class="secondary">Изтегли .xml</button>
       <span class="note" id="exportNote"></span>
     </div>
-    <p class="note">Проверете реда преди изтегляне — редовете в оранжево нямат сигурно разпознат IBAN или сума и трябва да се допълнят на ръка. Кликнете върху ⊘ в началото на реда, за да изключите запис от износа.</p>
+    <p class="note">Проверете реда преди изтегляне — редовете в оранжево нямат сигурно разпознат IBAN, сума или номер на връщане, или основанието е по-дълго от 35 знака и ще бъде отрязано. Кликнете върху ✓ / ⚑ в началото на реда, за да изключите запис от износа.</p>
   </div>
 
   <footer>Всичко се обработва локално в браузъра — файлът не се качва никъде.</footer>
@@ -158,32 +161,73 @@ function guessBic(iban){
 }
 
 /* ---------- parsing ---------- */
-const IBAN_RE = /\bBG\d{2}[A-Z]{4}[A-Z0-9]{6,}\b/i;
-// amount tokens: 1-2 decimal digits after a comma or dot, e.g. 11,75 or 23.50
+// Bulgarian IBAN = exactly 22 chars: BG + 2 check digits + 18 chars.
+// Spaces are allowed between characters (e.g. "BG80 UBBS 8002 ..."), and the
+// fixed length means digits written after the IBAN on the same line
+// (e.g. a return order number) are NOT swallowed into it.
+const IBAN_RE = /BG\s*\d\s*\d(?:\s*[A-Z0-9]){18}/i;
+// amount tokens: 2 decimal digits after a comma or dot, e.g. 11,75 or 23.50
 const AMOUNT_RE = /\d{1,7}[.,]\d{2}\b/g;
 // a line that is essentially only letters/spaces/hyphens (a name)
 const NAME_LINE_RE = /^[A-Za-zА-Яа-яЁёЇїІіЙй\-\.\s]{3,}$/;
 const DATE_RE = /\d{1,2}\.\d{1,2}\.\d{2,4}\s*г?\.?/gi;
+// currency words that sometimes sit next to the amount — not useful in основание
+const CURRENCY_RE = /(^|\s)(EUR|BGN|евро|лева|лв\.?)(?=\s|$)/gi;
+// a standalone return order / service number token: contains at least one digit,
+// made of letters/digits/-/ only (no comma or dot, so amounts and dates don't match),
+// optionally prefixed with № or #
+const ORDER_ID_RE = /^[№#]?\s*([A-Za-zА-Яа-я0-9\-\/]*\d[A-Za-zА-Яа-я0-9\-\/]*)$/;
 
-// Strips the IBAN, any date, and any amount out of a raw line, leaving only
-// whatever else is there (invoice / reference numbers etc.)
+function removeIban(line){
+  return line.replace(IBAN_RE, " ");
+}
+
+// Strips any date, amount and currency word out of a line, leaving only
+// whatever else is there (order / invoice / reference numbers etc.)
 function leftoverText(line){
   let s = line;
   s = s.replace(DATE_RE, " ");
   s = s.replace(AMOUNT_RE, " ");
+  s = s.replace(CURRENCY_RE, " ");
   s = s.replace(/[\/\-–—]+/g, " ");
   s = s.replace(/\s+/g, " ").trim();
   s = s.replace(/^[.,:;]+|[.,:;]+$/g, "").trim();
   return s;
 }
 
-// Builds the "основание" text from whatever in the block wasn't already used
-// for name / IBAN / amount / date — never repeats those. Always starts with "Сторно".
+// Finds the return order number in the block: the first token (on any line,
+// including the IBAN line once the IBAN is removed) that looks like an ID.
+function findOrderId(rec){
+  for (const line of rec.rawLines){
+    const rest = removeIban(line).replace(DATE_RE, " ").replace(AMOUNT_RE, " ")
+                                 .replace(CURRENCY_RE, " ").replace(/\s+/g, " ").trim();
+    if (!rest) continue;
+    // whole remaining line is one ID
+    const whole = rest.match(ORDER_ID_RE);
+    if (whole) return whole[1];
+    // otherwise, first ID-looking token on the line
+    for (const tok of rest.split(" ")){
+      const m = tok.match(ORDER_ID_RE);
+      if (m && /\d{3,}/.test(m[1])) return m[1];
+    }
+  }
+  return "";
+}
+
+// Builds the "основание": always "Сторно", then the order number FIRST
+// (so it can't be pushed out by the 35-char limit), then any other leftover
+// text from the block. Never repeats name / IBAN / amount / date.
 function buildReason(rec){
   const parts = [];
+  if (rec.orderId) parts.push(rec.orderId);
   for (const line of rec.rawLines){
-    if (IBAN_RE.test(line.replace(/\s+/g, ""))) continue; // skip the IBAN line itself
-    const cleaned = leftoverText(line);
+    let cleaned = leftoverText(removeIban(line));
+    if (!cleaned) continue;
+    if (rec.orderId){
+      // don't repeat the order number
+      cleaned = cleaned.split(" ").filter(t => t.replace(/^[№#]/, "") !== rec.orderId).join(" ").trim();
+      cleaned = cleaned.replace(/^[№#]\s*$/, "").trim();
+    }
     if (cleaned) parts.push(cleaned);
   }
   const unique = [...new Set(parts)];
@@ -216,7 +260,7 @@ function parseRecords(lines){
     const line = raw.trim();
     if (isNameLine(line)){
       if (current) records.push(current);
-      current = {name: line, iban:"", amount:null, reason:"", rawLines:[]};
+      current = {name: line, iban:"", amount:null, orderId:"", reason:"", rawLines:[]};
       continue;
     }
     if (!current){
@@ -224,62 +268,79 @@ function parseRecords(lines){
       continue;
     }
     current.rawLines.push(line);
-    const stripped = line.replace(/\s+/g, "");
-    const ibanMatch = stripped.match(IBAN_RE);
+    const ibanMatch = line.match(IBAN_RE);
     if (ibanMatch && !current.iban){
-      current.iban = ibanMatch[0].toUpperCase();
+      current.iban = ibanMatch[0].replace(/\s+/g, "").toUpperCase();
     }
   }
   if (current) records.push(current);
 
-  // derive amount + reason per record from rawLines (excluding the IBAN line itself)
+  // derive amount, order number and reason per record
   for (const rec of records){
     let total = 0;
     let found = false;
-    const notes = [];
     for (const line of rec.rawLines){
-      if (IBAN_RE.test(line.replace(/\s+/g,""))) continue;
-      const lineNoDate = line.replace(DATE_RE, " ");
-      const nums = lineNoDate.match(AMOUNT_RE);
+      const lineNoIbanNoDate = removeIban(line).replace(DATE_RE, " ");
+      const nums = lineNoIbanNoDate.match(AMOUNT_RE);
       if (nums){
         found = true;
         nums.forEach(n=> total += parseFloat(n.replace(",", ".")));
-        notes.push(line);
-      } else if (!/^\d+$/.test(line)) {
-        // keep non-pure-numeric lines as potential reason text (e.g. invoice refs)
-        notes.push(line);
       }
     }
     rec.amount = found ? Math.round(total*100)/100 : null;
+    rec.orderId = findOrderId(rec);
     rec.reason = buildReason(rec);
     rec.rawText = rec.rawLines.join(" | ");
-    rec.flagged = !rec.iban || rec.amount===null;
     rec.excluded = false;
   }
   return records;
 }
 
+/* ---------- validation ---------- */
+function reasonLength(rec){
+  return sanitizeField(rec.reason).length;
+}
+function needsReview(rec){
+  return !rec.iban || rec.amount===null || !rec.bic || !rec.orderId || reasonLength(rec) > 35;
+}
+
 /* ---------- rendering ---------- */
 let RECORDS = [];
+
+function rowClass(rec){
+  return (rec.flagged?"flagged ":"") + (rec.excluded?"excluded":"");
+}
+
+function updateSummary(){
+  const total = RECORDS.filter(r=>!r.excluded).length;
+  const flagged = RECORDS.filter(r=>r.flagged && !r.excluded).length;
+  const sum = RECORDS.filter(r=>!r.excluded && r.amount!==null).reduce((s,r)=>s+r.amount,0);
+  document.getElementById("summary").innerHTML = `
+    <div class="stat"><b>${total}</b>записа за износ</div>
+    <div class="stat ${flagged?"warn":""}"><b>${flagged}</b>за проверка</div>
+    <div class="stat"><b>${sum.toFixed(2)}</b>EUR общо</div>
+  `;
+}
 
 function render(){
   const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
-  RECORDS.forEach((rec, i)=>{
+  RECORDS.forEach((rec)=>{
     const bicInfo = rec.iban ? guessBic(rec.iban) : {bic:"", guessed:true};
     if (!rec.bic) rec.bic = bicInfo.bic;
-    rec.flagged = !rec.iban || rec.amount===null || !rec.bic;
+    rec.flagged = needsReview(rec);
 
     const tr = document.createElement("tr");
-    tr.className = (rec.flagged?"flagged ":"") + (rec.excluded?"excluded":"");
+    tr.className = rowClass(rec);
 
+    const len = reasonLength(rec);
     tr.innerHTML = `
       <td class="flagcol"><span class="excl-toggle" title="Изключи/включи от износа">${rec.excluded?"⊘":(rec.flagged?"⚑":"✓")}</span></td>
       <td class="name"><input data-f="name" value="${escapeHtml(rec.name)}"></td>
       <td class="iban"><input data-f="iban" value="${escapeHtml(rec.iban)}"></td>
       <td class="bic"><input data-f="bic" value="${escapeHtml(rec.bic)}"></td>
       <td class="amount"><input data-f="amount" value="${rec.amount===null?"":rec.amount.toFixed(2)}"></td>
-      <td class="reason"><input data-f="reason" value="${escapeHtml(rec.reason)}"></td>
+      <td class="reason"><input data-f="reason" value="${escapeHtml(rec.reason)}"><span class="len ${len>35?"over":""}">${len}/35${rec.orderId?"":" · няма № на връщане"}</span></td>
       <td class="raw"><pre>${escapeHtml(rec.rawText)}</pre></td>
     `;
     tr.querySelector(".excl-toggle").addEventListener("click", ()=>{
@@ -289,22 +350,32 @@ function render(){
     tr.querySelectorAll("input").forEach(inp=>{
       inp.addEventListener("input", ()=>{
         const f = inp.dataset.f;
-        rec[f] = f==="amount" ? parseFloat(inp.value.replace(",", "."))||null : inp.value;
-        rec.flagged = !rec.iban || rec.amount===null || !rec.bic;
-        tr.className = (rec.flagged?"flagged ":"") + (rec.excluded?"excluded":"");
+        if (f==="amount"){
+          const v = parseFloat(inp.value.replace(",", "."));
+          rec.amount = isNaN(v) ? null : v;
+        } else if (f==="iban"){
+          rec.iban = inp.value.replace(/\s+/g, "").toUpperCase();
+        } else {
+          rec[f] = inp.value;
+        }
+        if (f==="reason"){
+          // if the user typed an order number into the основание by hand, count it as present
+          if (!rec.orderId && /\d{3,}/.test(rec.reason)) rec.orderId = "manual";
+          const lenEl = tr.querySelector(".len");
+          const l = reasonLength(rec);
+          lenEl.textContent = `${l}/35` + (rec.orderId ? "" : " · няма № на връщане");
+          lenEl.className = "len" + (l>35 ? " over" : "");
+        }
+        rec.flagged = needsReview(rec);
+        tr.className = rowClass(rec);
+        tr.querySelector(".excl-toggle").textContent = rec.excluded?"⊘":(rec.flagged?"⚑":"✓");
+        updateSummary();
       });
     });
     tbody.appendChild(tr);
   });
 
-  const total = RECORDS.filter(r=>!r.excluded).length;
-  const flagged = RECORDS.filter(r=>r.flagged && !r.excluded).length;
-  const sum = RECORDS.filter(r=>!r.excluded && r.amount!==null).reduce((s,r)=>s+r.amount,0);
-  document.getElementById("summary").innerHTML = `
-    <div class="stat"><b>${total}</b>записа за износ</div>
-    <div class="stat ${flagged?"warn":""}"><b>${flagged}</b>за проверка</div>
-    <div class="stat"><b>${sum.toFixed(2)}</b>EUR общо</div>
-  `;
+  updateSummary();
   document.getElementById("results").classList.remove("hidden");
 }
 
