@@ -108,8 +108,8 @@
       </label>
       <label title="Редове, на които сте редактирали основанието ръчно, не се променят.">Основание:
         <select id="reasonMode">
+          <option value="full" selected>„Сторно" + номер на връщане</option>
           <option value="plain">само „Сторно"</option>
-          <option value="full">„Сторно" + номер от документа</option>
         </select>
       </label>
       <button id="forgetBic" class="ghost hidden" type="button" style="padding:5px 10px;font-size:12px;"></button>
@@ -406,7 +406,27 @@ const HIGH_AMOUNT = 100;
 const fmtAmount = v => v === null || v === undefined ? "" : v.toFixed(2);
 const NAME_LINE_RE = /^[A-Za-zА-Яа-яЁёЇїІіЙй\-\.\s]{3,}$/;
 const DATE_RE = /\d{1,2}\.\d{1,2}\.\d{2,4}\s*г?\.?/gi;
-const hasIban = line => IBAN_RE.test(line.replace(/\s+/g, ""));
+// Finds an IBAN in a line (spaces inside it allowed, optional "IBAN:" before it) and returns it
+// together with whatever else is on the line. The match is cut to the country's IBAN length, so a
+// number written right after the IBAN (e.g. the return order number) is not glued onto it.
+const IBAN_IN_LINE_RE = /(?<![A-Z0-9])(IBAN:?)?([A-Z]{2}\d{2}[A-Z0-9]{10,})/i;
+function findIban(line){
+  const pos = []; let s = "";
+  for (let i = 0; i < line.length; i++) if (!/\s/.test(line[i])){ pos.push(i); s += line[i]; }
+  const m = s.match(IBAN_IN_LINE_RE);
+  if (!m) return null;
+  let iban = m[2].toUpperCase();
+  const spec = IBAN_SPEC[iban.slice(0,2)];
+  const maxLen = spec ? spec[0] : 34;
+  if (iban.length > maxLen) iban = iban.slice(0, maxLen);
+  if (iban.length < 15) return null;
+  const end = pos[m.index + (m[1] ? m[1].length : 0) + iban.length - 1] + 1;
+  const rest = (line.slice(0, pos[m.index]) + " " + line.slice(end)).replace(/\s+/g, " ").trim();
+  return {iban, rest};
+}
+const hasIban = line => !!findIban(line);
+// The line without its IBAN (unchanged if there is none).
+const withoutIban = line => { const f = findIban(line); return f ? f.rest : line; };
 
 function leftoverText(line){
   let s = line.replace(DATE_RE, " ").replace(AMOUNT_RE, " ").replace(CURRENCY_RE, " ").replace(/[\/\-–—]+/g, " ").replace(/\s+/g, " ").trim();
@@ -415,8 +435,10 @@ function leftoverText(line){
 function buildReason(rec){
   const parts = [];
   for (const line of rec.rawLines){
-    if (hasIban(line) || (rec.amountLines || []).includes(line)) continue;
-    const c = leftoverText(line);
+    // Keep anything written next to an IBAN (e.g. the return order number) – only the IBAN itself is dropped.
+    const rest = withoutIban(line);
+    if (!rest || (rec.amountLines || []).includes(rest)) continue;
+    const c = leftoverText(rest);
     if (c) parts.push(c);
   }
   const unique = [...new Set(parts)];
@@ -456,7 +478,7 @@ function blankRecord(){
   return finishRecord({name:"", iban:"", amount:null, reasonFull:"Сторно", rawLines:[], rawText:"(добавен ръчно)"});
 }
 // "plain" → just "Сторно"; "full" → "Сторно" + the reference number(s) from the document
-let REASON_MODE = "plain";
+let REASON_MODE = "full";
 const autoReason = rec => REASON_MODE === "full" ? rec.reasonFull : "Сторно";
 function parseRecords(lines){
   const records = [];
@@ -470,8 +492,8 @@ function parseRecords(lines){
     }
     if (!cur) continue;
     cur.rawLines.push(line);
-    const m = line.replace(/\s+/g, "").match(IBAN_RE);
-    if (m) (cur.ibans = cur.ibans || []).push(m[0].toUpperCase());
+    const f = findIban(line);
+    if (f) (cur.ibans = cur.ibans || []).push(f.iban);
   }
   if (cur) records.push(cur);
   // A block can contain several IBAN lines (corrected or repeated). Use the first valid one.
@@ -484,8 +506,9 @@ function parseRecords(lines){
   for (const rec of records){
     let total = 0, found = false;
     rec.amountLines = [];
-    for (const line of rec.rawLines){
-      if (hasIban(line)) continue;
+    for (const raw of rec.rawLines){
+      const line = withoutIban(raw);             // the IBAN itself never counts as an amount
+      if (!line) continue;
       if (DEC_AMOUNT_LINE_RE.test(line)){          // whole line is an amount, e.g. "1 234,56 лв."
         found = true; total += parseAmount(line.replace(CURRENCY_RE, "")) || 0;
         rec.amountLines.push(line);
@@ -498,10 +521,12 @@ function parseRecords(lines){
     rec.amountWhole = false;
     // No decimal amount found: accept a whole number ("9", "18 лв.") if it's the last line of the block.
     if (!found){
-      const rest = rec.rawLines.filter(l => !hasIban(l));
+      const rest = rec.rawLines.map(withoutIban).filter(Boolean);
       const last = rest[rest.length - 1] || "";
       const m = last.match(INT_AMOUNT_LINE_RE);
-      if (m && Number(m[1]) > 0){
+      // Only if another line comes before it (normally the return order number). A lone short number
+      // could just as well be the order number, so it is left in the reason and the amount stays empty.
+      if (m && Number(m[1]) > 0 && rest.length > 1){
         rec.amount = Number(m[1]);
         rec.amountLines.push(last); // keep it out of the payment reason
         rec.amountWhole = true;    // shown as a "check the amount" warning until edited
@@ -556,6 +581,10 @@ function problems(r){
   }
   const reasonLen = (foreign ? swiftField(r.reason, 35) : sanitizeField(r.reason, 35)).length;
   if (reasonLen < 2) p.push({block:true, label:"Основанието трябва да е поне 2 символа"});
+  const reasonFullLen = (foreign ? swiftField(r.reason) : sanitizeField(r.reason)).length;
+  if (reasonFullLen > 35) p.push({block:false, label:`Основанието е ${reasonFullLen} знака – ще бъде отрязано до 35`});
+  if (REASON_MODE === "full" && !r.reasonManual && (r.rawLines || []).length && (r.reasonFull || "").trim() === "Сторно")
+    p.push({block:false, label:"Не е намерен номер на връщане – проверете основанието"});
   const bic = cleanBic(r.bic);
   if (!bic){
     p.push(foreign
