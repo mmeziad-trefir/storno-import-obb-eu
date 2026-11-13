@@ -427,17 +427,20 @@ function leftoverText(line){
   let s = line.replace(DATE_RE, " ").replace(AMOUNT_RE, " ").replace(CURRENCY_RE, " ").replace(/[\/\-–—]+/g, " ").replace(/\s+/g, " ").trim();
   return s.replace(/^[.,:;]+|[.,:;]+$/g, "").trim();
 }
+// Основание = "Сторно. <номер>. <номер>. ..." – the comment first, then every return order number
+// found in the block, separated by dots. Numbers next to an IBAN count too; amounts and dates don't.
+// Dots are used because UBB does not allow commas in the payment reason (dots are allowed in both BG and SWIFT files).
 function buildReason(rec){
-  const parts = [];
+  const ids = [];
   for (const line of rec.rawLines){
-    // Keep anything written next to an IBAN (e.g. the return order number) – only the IBAN itself is dropped.
     const rest = withoutIban(line);
     if (!rest || (rec.amountLines || []).includes(rest)) continue;
-    const c = leftoverText(rest);
-    if (c) parts.push(c);
+    for (const tok of leftoverText(rest).split(/[\s,;]+/)){
+      const id = tok.replace(/^[№#]+/, "");
+      if (/\d/.test(id) && !ids.includes(id)) ids.push(id);
+    }
   }
-  const unique = [...new Set(parts)];
-  return unique.length ? `Сторно ${unique.join(" ")}` : "Сторно";
+  return ["Сторно", ...ids].join(". ");
 }
 async function extractParagraphs(file){
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
